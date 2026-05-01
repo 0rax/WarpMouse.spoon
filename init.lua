@@ -18,13 +18,17 @@ WarpMouse.reverseScreens    = false
 -- a global variable that PaperWM can use to disable the eventtap while Mission Control is open
 _WarpMouseEventTap          = nil
 
---- Calculates the relative y position of the cursor on a new screen.
---- @param y number the y position of the cursor on the current screen
+--- Maps cursor y from current screen center-relative to new screen center-relative.
+--- Returns nil if the mapped position falls outside the new screen (no warp).
+--- @param y number the y position of the cursor
 --- @param current_frame table the frame of the current screen
 --- @param new_frame table the frame of the new screen
---- @return number the y position of the cursor on the new screen
+--- @return number|nil the y position on the new screen, or nil to cancel warp
 local function relative_y(y, current_frame, new_frame)
-    return new_frame.h * (y - current_frame.y) / current_frame.h + new_frame.y
+    local offset = y - (current_frame.y + current_frame.h / 2)
+    local new_y = new_frame.y + new_frame.h / 2 + offset
+    if new_y < new_frame.y or new_y > new_frame.y2 then return nil end
+    return new_y
 end
 
 --- Warps the mouse from one position to another.
@@ -34,7 +38,7 @@ local function warp(from, to)
     _WarpMouseEventTap:stop()
     newMouseEvent(eventTypes.mouseMoved, to):post();
     _WarpMouseEventTap:start()
-    if WarpMouse.logger.getLogLevel() < 5 then
+    if WarpMouse.logger.getLogLevel() >= 4 then
         WarpMouse.logger.df("Warping mouse from %s to %s", hs.inspect(from), hs.inspect(to))
     end
 end
@@ -53,18 +57,31 @@ local function get_screen(cursor, frames)
     error("cursor is not in any screen")
 end
 
+
 --- Starts the WarpMouse spoon.
 function WarpMouse:start()
     self.screens = hs.screen.allScreens()
 
     local reverse = self.reverseScreens and -1 or 1
     table.sort(self.screens, function(a, b)
-        -- sort list by screen postion top to bottom
-        return reverse * select(2, a:position()) < select(2, b:position())
+        return reverse * a:fullFrame().y < reverse * b:fullFrame().y
     end)
 
     for i, screen in ipairs(self.screens) do
         self.screens[i] = screen:fullFrame()
+    end
+
+    self.adjacency = {}
+    for _, frame in ipairs(self.screens) do
+        local left, right = nil, nil
+        for _, other in ipairs(self.screens) do
+            if other ~= frame then
+                if math.abs(other.x2 - frame.x) <= 1 then left = other
+                elseif math.abs(other.x - frame.x2) <= 1 then right = other
+                end
+            end
+        end
+        self.adjacency[frame] = { left = left, right = right }
     end
 
     self.logger.f("Starting with screens from left to right: %s",
@@ -76,16 +93,21 @@ function WarpMouse:start()
         eventTypes.rightMouseDragged,
     }, function(event)
         local cursor = event:location()
-        local index, frame = get_screen(cursor, self.screens)
+        local _, frame = get_screen(cursor, self.screens)
+        local adj = self.adjacency[frame]
         if cursor.x == frame.x then
-            local left_frame = self.screens[index - 1]
-            if left_frame then
-                warp(cursor, { x = left_frame.x2 - self.margin, y = relative_y(cursor.y, frame, left_frame) })
+            if adj.left then
+                local new_y = relative_y(cursor.y, frame, adj.left)
+                if new_y then
+                    warp(cursor, { x = adj.left.x2 - self.margin, y = new_y })
+                end
             end
         elseif cursor.x > frame.x2 - 0.5 and cursor.x <= frame.x2 then
-            local right_frame = self.screens[index + 1]
-            if right_frame then
-                warp(cursor, { x = right_frame.x + self.margin, y = relative_y(cursor.y, frame, right_frame) })
+            if adj.right then
+                local new_y = relative_y(cursor.y, frame, adj.right)
+                if new_y then
+                    warp(cursor, { x = adj.right.x + self.margin, y = new_y })
+                end
             end
         end
     end):start()
@@ -112,6 +134,7 @@ function WarpMouse:stop()
     end
 
     self.screens = nil
+    self.adjacency = nil
 end
 
 return WarpMouse
